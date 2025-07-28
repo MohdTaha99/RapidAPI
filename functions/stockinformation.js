@@ -1,131 +1,129 @@
-const express = require('express');
-const serverless = require('serverless-http');
-const axios = require('axios');
-const cheerio = require('cheerio');
-
-const app = express();
+const express = require('express')
+const serverless = require('serverless-http')
+const axios = require('axios')
+const cheerio = require('cheerio')
+const app = express()
 const router = express.Router();
 
-// Import helper functions (assumed to be in helpers.js)
-const { getLastFridayOrNonHolidayDate, dateToUnixTimestamp, dateToUnixTimestampPlusADay, formatDateToMatchApiArgument } = require('./helpers.js');
+const { getLastFridayOrNonHolidayDate, dateToUnixTimestampPlusADay, dateToUnixTimestamp, formatDateToMatchApiArgument } = require('./helpers.js');
 
 const headers = {
-  'User-Agent': 'Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Mobile Safari/537.36',
-};
-
-// Middleware for CORS
-app.use((req, res, next) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  if (req.method === 'OPTIONS') {
-    return res.sendStatus(200);
-  }
-  next();
-});
-
-// Welcome endpoint
+    'User-Agent': 'Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Mobile Safari/537.36',
+}
+  
 router.get('/', (req, res) => {
-  res.json({ message: 'Welcome to the stock information API' });
-});
+    res.json('Welcome to the stock information API')
+})
 
-// Stock return endpoint
 router.get('/return/:symbol/:firstDate/:secondDate', async (req, res) => {
-  try {
-    const { symbol, firstDate, secondDate } = req.params;
+    
+    try{
+        var startDateValue = 0;
+        var endDateValue = 0;
+        var result = 0.0;
 
-    // Validate input parameters
-    if (!symbol || !firstDate || !secondDate) {
-      return res.status(400).json({ error: 'Missing required parameters' });
+        const { symbol, firstDate, secondDate } = req.params;
+
+        var startDate = getLastFridayOrNonHolidayDate(firstDate);
+        var endDate = getLastFridayOrNonHolidayDate(secondDate);
+
+        const url = 'https://finance.yahoo.com/quote/' + symbol + '/history/?period1=' + dateToUnixTimestamp(startDate) +'&period2=' + dateToUnixTimestampPlusADay(endDate);
+
+        const response = await axios.get(url, {headers,});
+        const html = response.data;
+    
+        const $ = cheerio.load(html);
+
+        const processRows = () => {
+            $('tbody tr.svelte-ewueuo').each((index, element) => {
+                const row = $(element);
+                const dateCell = row.find('td:nth-child(1)').text();
+
+                if (formatDateToMatchApiArgument(dateCell) == startDate) {
+                    startDateValue = parseFloat(row.find('td:nth-child(2)').text());
+                }
+
+                if (formatDateToMatchApiArgument(dateCell) === endDate) {
+                    endDateValue = parseFloat(row.find('td:nth-child(2)').text());
+                }
+            });
+
+            if (startDateValue !== 0 && endDateValue !== 0) {
+                result = ((endDateValue - startDateValue) / startDateValue) * 100;
+                res.json(result.toFixed(2));
+            } else {
+                console.log('Start date or end date not found.');
+                res.status(404).send('Start date or end date not found.');
+            }
+        };
+
+        processRows();
+
+    } catch(error) {
+        console.error('Error:', error);
+        res.status(500).send('Internal Server Error');
     }
+})
 
-    const startDate = getLastFridayOrNonHolidayDate(firstDate);
-    const endDate = getLastFridayOrNonHolidayDate(secondDate);
 
-    const url = `https://finance.yahoo.com/quote/${symbol}/history/?period1=${dateToUnixTimestamp(startDate)}&period2=${dateToUnixTimestampPlusADay(endDate)}`;
+router.get('/dividend/:symbol', (req, res) => {
+    
+    const symbol = req.params.symbol
 
-    const response = await axios.get(url, { headers, timeout: 5000 });
-    const $ = cheerio.load(response.data);
+    const url = 'https://www.streetinsider.com/dividend_history.php?q='
 
-    let startDateValue = 0;
-    let endDateValue = 0;
 
-    const rows = $('tbody tr.svelte-ewueuo');
-    if (rows.length === 0) {
-      return res.status(404).json({ error: 'No historical data found for the symbol' });
-    }
+    axios.get(url + symbol)
+        .then(response => {
+            const html = response.data
+            const $ = cheerio.load(html)
+            const parsedData = []
+            const dividendData = []
 
-    rows.each((index, element) => {
-      const row = $(element);
-      const dateCell = row.find('td:nth-child(1)').text();
-      const price = row.find('td:nth-child(2)').text();
+            $('td', html).each(function () {
+                const data = $(this).text()
 
-      if (formatDateToMatchApiArgument(dateCell) === startDate) {
-        startDateValue = parseFloat(price);
-      }
-      if (formatDateToMatchApiArgument(dateCell) === endDate) {
-        endDateValue = parseFloat(price);
-      }
-    });
+                dividendData.push({
+                    data
+                })
+            })
 
-    if (startDateValue && endDateValue) {
-      const result = ((endDateValue - startDateValue) / startDateValue) * 100;
-      return res.json({ return: result.toFixed(2) });
+            for (i = 0; i < dividendData.length; i=i+9) {
+
+                var dividend = {
+                    ExDivDate: JSON.stringify(dividendData[i]).split(':')[1].slice(1,-2),
+                    Amount: JSON.stringify(dividendData[i+1]).split(':')[1].slice(1,-2),
+                    DeclarationDate: JSON.stringify(dividendData[i+5]).split(':')[1].slice(1,-2),
+                    RecordDate: JSON.stringify(dividendData[i+6]).split(':')[1].slice(1,-2),
+                    PaymentDate: JSON.stringify(dividendData[i+7]).split(':')[1].slice(1,-2),
+                }
+
+                parsedData.push(dividend)
+              } 
+
+            res.json(parsedData)
+
+        }).catch(err => console.log(err))
+})
+
+app.use((req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, PATCH, DELETE');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.setHeader('Access-Control-Allow-Credentials', true);
+    if (req.method === 'OPTIONS') {
+      res.sendStatus(200);
     } else {
-      return res.status(404).json({ error: 'Start date or end date not found in data' });
+      next();
     }
-  } catch (error) {
-    console.error('Error in /return:', error.message);
-    return res.status(500).json({ error: 'Failed to fetch stock data', details: error.message });
-  }
-});
+  });
+  
 
-// Dividend endpoint
-router.get('/dividend/:symbol', async (req, res) => {
-  try {
-    const { symbol } = req.params;
+app.use('/.netlify/functions/stockinformation', router)
 
-    if (!symbol) {
-      return res.status(400).json({ error: 'Missing symbol parameter' });
-    }
 
-    const url = `https://www.streetinsider.com/dividend_history.php?q=${symbol}`;
-    const response = await axios.get(url, { headers, timeout: 5000 });
-    const $ = cheerio.load(response.data);
 
-    const dividendData = [];
-    const rows = $('table tbody tr');
+module.exports.handler=serverless(app)
 
-    if (rows.length === 0) {
-      return res.status(404).json({ error: 'No dividend data found for the symbol' });
-    }
-
-    rows.each((index, element) => {
-      const cells = $(element).find('td');
-      if (cells.length >= 8) {
-        dividendData.push({
-          ExDivDate: $(cells[0]).text().trim(),
-          Amount: $(cells[1]).text().trim(),
-          DeclarationDate: $(cells[5]).text().trim(),
-          RecordDate: $(cells[6]).text().trim(),
-          PaymentDate: $(cells[7]).text().trim(),
-        });
-      }
-    });
-
-    if (dividendData.length === 0) {
-      return res.status(404).json({ error: 'No valid dividend data parsed' });
-    }
-
-    return res.json(dividendData);
-  } catch (error) {
-    console.error('Error in /dividend:', error.message);
-    return res.status(500).json({ error: 'Failed to fetch dividend data', details: error.message });
-  }
-});
-
-// Mount router to Netlify functions path
-app.use('/.netlify/functions/stockinformation', router);
-
-// Export handler for Netlify
-module.exports.handler = serverless(app);
+//remove commented code from below for local testing
+//module.exports = router;
